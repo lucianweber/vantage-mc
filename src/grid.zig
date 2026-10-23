@@ -232,7 +232,8 @@ fn isAir(name: []const u8) bool {
 
 /// Assemble a grid over region-local chunk coords [cx0..cx1] x [cz0..cz1]
 /// (inclusive, each 0..31). Chunks that are absent or fail to decode are skipped
-/// (counted in `stats`), never fatal.
+/// (counted in `stats`), except unrecognized block-state encodings, which must
+/// reach the caller so incompatible chunks cannot silently disappear.
 pub fn assemble(
     arena: std.mem.Allocator,
     region_bytes: []const u8,
@@ -251,6 +252,9 @@ pub fn assemble(
         while (cx <= cx1) : (cx += 1) {
             const ch = decodeChunk(arena, reg, @intCast(cx), @intCast(cz)) catch |err| {
                 switch (err) {
+                    // An unknown palette encoding must reach the caller,
+                    // rather than making this chunk look like missing air.
+                    error.InvalidBlockState => return err,
                     error.PreModernChunk => stats.chunks_premodern += 1,
                     error.UnsupportedCompression, error.ExternalChunk => stats.chunks_unreadable += 1,
                     else => {},
@@ -438,6 +442,26 @@ pub fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5)
     var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };
     const root = try parser.parseRoot();
     return try chunk.decode(arena, root);
+}
+
+test "assemble propagates unrecognized block-state palettes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes = "\x0a\x00\x00" ++
+        "\x09\x00\x08sections\x0a\x00\x00\x00\x01" ++
+        "\x01\x00\x01Y\x00" ++
+        "\x0a\x00\x0cblock_states" ++
+        "\x09\x00\x07palette\x03\x00\x00\x00\x01\x00\x00\x00\x01" ++
+        "\x00\x00\x00";
+    // One uncompressed chunk in sector 2, at region-local (0, 0).
+    var region_bytes: [3 * region.SECTOR]u8 = @splat(0);
+    region_bytes[2] = 2;
+    region_bytes[3] = 1;
+    std.mem.writeInt(u32, region_bytes[8192..8196], bytes.len + 1, .big);
+    region_bytes[8196] = 3;
+    @memcpy(region_bytes[8197..][0..bytes.len], bytes);
+    var stats: Stats = .{};
+    try std.testing.expectError(error.InvalidBlockState, assemble(arena.allocator(), &region_bytes, 0, 0, 0, 0, &stats));
 }
 
 test "air-only sections don't stretch the grid's vertical extent" {

@@ -371,6 +371,7 @@ pub fn assembleWindow(
                 };
                 const ch = decodeChunkAt(arena, io, file, loc) catch |err| {
                     switch (err) {
+                        error.InvalidBlockState => return err,
                         error.PreModernChunk => stats.chunks_premodern += 1,
                         error.UnsupportedCompression, error.ExternalChunk => stats.chunks_unreadable += 1,
                         else => {},

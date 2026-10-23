@@ -1312,6 +1312,7 @@ fn renderDimension(
     var write_ms: i64 = 0;
     var tiles_failed: usize = 0;
     var first_tile_err: ?anyerror = null;
+    var reported_invalid_block_state = false;
     for (results, tile_keys) |*r, key| {
         if (r.err) |e| {
             // One bad tile (a corrupt region, a decode blow-up) must not
@@ -1319,6 +1320,10 @@ fn renderDimension(
             const tx: i32 = @bitCast(@as(u32, @truncate(key >> 32)));
             const tz: i32 = @bitCast(@as(u32, @truncate(key)));
             std.debug.print("tile ({d},{d}) failed: {s}\n", .{ tx, tz, @errorName(e) });
+            if (e == error.InvalidBlockState and !reported_invalid_block_state) {
+                std.debug.print("  unrecognized or malformed block-state palette; this save may use a newer Minecraft format that this version of vantage cannot read.\n", .{});
+                reported_invalid_block_state = true;
+            }
             tiles_failed += 1;
             if (first_tile_err == null) first_tile_err = e;
             continue;

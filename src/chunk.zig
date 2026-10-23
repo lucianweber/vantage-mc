@@ -1,9 +1,10 @@
 //! Chunk decode: parsed NBT root -> per-section block grids.
 //!
 //! A modern (1.18+) chunk stores its blocks in up to 24 sections of 16^3.
-//! Each section's `block_states` holds a `palette` (list of block-state
-//! compounds, we keep only the `Name`) and an optional packed `data` long-array
-//! of palette indices in the non-spanning post-1.16 layout. We unpack each
+//! Each section's `block_states` holds a `palette` (legacy `Name`/`Properties`
+//! compounds, or 26.3 compact strings and `id`/`properties` compounds) and an
+//! optional packed `data` long-array of palette indices in the non-spanning
+//! post-1.16 layout. We unpack each
 //! section into a flat `[]u16` of palette indices in Minecraft's YZX order
 //! (index = (y*16 + z)*16 + x), which the grid assembler then reads.
 //!
@@ -26,7 +27,7 @@ pub const Section = struct {
     /// Palette block names (slices into the NBT arena).
     names: [][]const u8,
     /// Per-palette-entry normalized block-state key ("axis=x", "facing=north,
-    /// half=bottom", …), sorted by property; "" when the entry has no Properties.
+    /// half=bottom", …), sorted by property; "" for compact/default states.
     states: [][]const u8,
     /// 4096 palette indices in YZX order. For a single-entry palette this is
     /// empty and every block is `names[0]`.
@@ -60,7 +61,7 @@ pub const Chunk = struct {
     data_version: i32,
 };
 
-pub const Error = error{ BadFormat, NoSections, PreModernChunk } || std.mem.Allocator.Error;
+pub const Error = error{ BadFormat, NoSections, PreModernChunk, InvalidBlockState } || std.mem.Allocator.Error;
 
 /// bits-per-index = max(4, ceil(log2(palette_len))).
 pub fn bitsForPalette(n: usize) u6 {
@@ -125,16 +126,9 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
         const names = try arena.alloc([]const u8, palette.len);
         const states = try arena.alloc([]const u8, palette.len);
         for (palette, names, states) |p, *nm, *st| {
-            nm.* = "minecraft:air";
-            st.* = "";
-            if (p == .compound) {
-                if (nbt.get(p.compound, "Name")) |n| {
-                    if (n.* == .string) nm.* = n.string;
-                }
-                if (nbt.get(p.compound, "Properties")) |pr| {
-                    if (pr.* == .compound) st.* = try buildStateKey(arena, pr.compound);
-                }
-            }
+            const state = try decodeBlockState(arena, p);
+            nm.* = state.name;
+            st.* = state.state;
         }
 
         const data_tag = nbt.get(bs.compound, "data");
@@ -166,7 +160,34 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
     };
 }
 
-/// Build a normalized state key from a block's `Properties` compound: each
+const BlockState = struct { name: []const u8, state: []const u8 = "" };
+
+/// Accept both formats independently of DataVersion: upgraded worlds commonly
+/// contain chunks from multiple releases. Never turn an unrecognized entry into
+/// air, which would silently erase terrain from otherwise successful renders.
+fn decodeBlockState(arena: std.mem.Allocator, entry: nbt.Tag) Error!BlockState {
+    if (entry == .string) {
+        if (entry.string.len == 0) return error.InvalidBlockState;
+        return .{ .name = entry.string };
+    }
+    if (entry != .compound) return error.InvalidBlockState;
+    const fields = entry.compound;
+    // NBT lists have a single element type. In mixed 26.3 palettes Minecraft
+    // wraps a compact string in a compound containing one unnamed string tag.
+    if (fields.len == 1 and fields[0].name.len == 0 and fields[0].tag == .string)
+        return decodeBlockState(arena, fields[0].tag);
+
+    const name = nbt.get(fields, "id") orelse nbt.get(fields, "Name") orelse return error.InvalidBlockState;
+    if (name.* != .string or name.string.len == 0) return error.InvalidBlockState;
+    var state: []const u8 = "";
+    if (nbt.get(fields, "properties") orelse nbt.get(fields, "Properties")) |props| {
+        if (props.* != .compound) return error.InvalidBlockState;
+        state = try buildStateKey(arena, props.compound);
+    }
+    return .{ .name = name.string, .state = state };
+}
+
+/// Build a normalized state key from a block's properties compound: each
 /// string property as "k=v", sorted by key, joined with ",". Sorting makes the
 /// key canonical so it matches blockstate variant keys (which are sorted too).
 fn buildStateKey(arena: std.mem.Allocator, props: []const nbt.Entry) Error![]const u8 {
@@ -174,7 +195,7 @@ fn buildStateKey(arena: std.mem.Allocator, props: []const nbt.Entry) Error![]con
     for (props) |e| {
         const v = switch (e.tag) {
             .string => |s| s,
-            else => continue,
+            else => return error.InvalidBlockState,
         };
         try pairs.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ e.name, v }));
     }
@@ -244,6 +265,136 @@ fn readInt(root: []const nbt.Entry, name: []const u8) i32 {
         .long => |v| @intCast(v),
         else => 0,
     };
+}
+
+// Exercise the real section decoder, including packed indices and a negative Y.
+fn decodeTestPalette(arena: std.mem.Allocator, palette: []nbt.Tag) !Chunk {
+    var data: [256]i64 = @splat(0x10);
+    var block_states = [_]nbt.Entry{
+        .{ .name = "palette", .tag = .{ .list = .{ .elem = std.meta.activeTag(palette[0]), .items = palette } } },
+        .{ .name = "data", .tag = .{ .long_array = &data } },
+    };
+    var fields = [_]nbt.Entry{
+        .{ .name = "Y", .tag = .{ .byte = -4 } },
+        .{ .name = "block_states", .tag = .{ .compound = block_states[0..if (palette.len > 1) 2 else 1] } },
+    };
+    var sections = [_]nbt.Tag{.{ .compound = &fields }};
+    const root = [_]nbt.Entry{
+        .{ .name = "DataVersion", .tag = .{ .int = 5023 } },
+        .{ .name = "xPos", .tag = .{ .int = -13 } },
+        .{ .name = "zPos", .tag = .{ .int = -22 } },
+        .{ .name = "sections", .tag = .{ .list = .{ .elem = .compound, .items = &sections } } },
+    };
+    return decode(arena, &root);
+}
+
+test "decode preserves legacy block names, sorted properties, and packed indices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var props = [_]nbt.Entry{
+        .{ .name = "waterlogged", .tag = .{ .string = "false" } },
+        .{ .name = "facing", .tag = .{ .string = "north" } },
+    };
+    var air = [_]nbt.Entry{.{ .name = "Name", .tag = .{ .string = "minecraft:air" } }};
+    var stairs = [_]nbt.Entry{
+        .{ .name = "Name", .tag = .{ .string = "minecraft:oak_stairs" } },
+        .{ .name = "Properties", .tag = .{ .compound = &props } },
+    };
+    var palette = [_]nbt.Tag{ .{ .compound = &air }, .{ .compound = &stairs } };
+    const ch = try decodeTestPalette(arena.allocator(), &palette);
+    try std.testing.expectEqual(@as(usize, 1), ch.sections.len);
+    const section = ch.sections[0];
+    try std.testing.expectEqual(@as(i32, -4), section.y);
+    try std.testing.expectEqualStrings("minecraft:air", section.names[0]);
+    try std.testing.expectEqualStrings("minecraft:oak_stairs", section.names[1]);
+    try std.testing.expectEqualStrings("", section.states[0]);
+    try std.testing.expectEqualStrings("facing=north,waterlogged=false", section.states[1]);
+    try std.testing.expectEqual(@as(u16, 0), section.paletteIndexAt(0, 0, 0));
+    try std.testing.expectEqual(@as(u16, 1), section.paletteIndexAt(1, 0, 0));
+}
+
+test "decode compact string palettes, including uniform stone and real air" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "minecraft:stone", "minecraft:air" }) |name| {
+        var palette = [_]nbt.Tag{.{ .string = name }};
+        const ch = try decodeTestPalette(arena.allocator(), &palette);
+        try std.testing.expectEqual(@as(i32, 5023), ch.data_version);
+        try std.testing.expectEqual(@as(i32, -13), ch.x);
+        try std.testing.expectEqual(@as(i32, -22), ch.z);
+        const section = ch.sections[0];
+        try std.testing.expectEqualStrings(name, section.names[0]);
+        try std.testing.expectEqualStrings("", section.states[0]);
+        try std.testing.expectEqual(@as(usize, 0), section.indices.len);
+    }
+    var palette = [_]nbt.Tag{ .{ .string = "minecraft:stone" }, .{ .string = "minecraft:dirt" } };
+    const ch = try decodeTestPalette(arena.allocator(), &palette);
+    try std.testing.expectEqualStrings("minecraft:stone", ch.sections[0].names[0]);
+    try std.testing.expectEqualStrings("minecraft:dirt", ch.sections[0].names[1]);
+    try std.testing.expectEqual(@as(u16, 1), ch.sections[0].paletteIndexAt(1, 0, 0));
+}
+
+test "decode mixed 26.3 palettes from serialized NBT, including wrapped strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Heterogeneous NBT lists wrap scalar values in a compound with an empty
+    // field name. This is how 26.3 stores stone alongside a stateful block.
+    const bytes = "\x0a\x00\x00" ++
+        "\x09\x00\x07palette\x0a\x00\x00\x00\x02" ++
+        "\x08\x00\x00\x00\x0fminecraft:stone\x00" ++
+        "\x08\x00\x02id\x00\x11minecraft:oak_log" ++
+        "\x0a\x00\x0aproperties\x08\x00\x04axis\x00\x01x\x00\x00" ++
+        "\x00";
+    var parser = nbt.Parser{ .buf = bytes, .arena = arena.allocator() };
+    const root = try parser.parseRoot();
+    const ch = try decodeTestPalette(arena.allocator(), nbt.get(root, "palette").?.list.items);
+    const section = ch.sections[0];
+    try std.testing.expectEqualStrings("minecraft:stone", section.names[0]);
+    try std.testing.expectEqualStrings("", section.states[0]);
+    try std.testing.expectEqualStrings("minecraft:oak_log", section.names[1]);
+    try std.testing.expectEqualStrings("axis=x", section.states[1]);
+    try std.testing.expectEqual(@as(u16, 1), section.paletteIndexAt(1, 0, 0));
+}
+
+test "decode id-only block-state compounds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fields = [_]nbt.Entry{.{ .name = "id", .tag = .{ .string = "minecraft:stone" } }};
+    var palette = [_]nbt.Tag{.{ .compound = &fields }};
+    const ch = try decodeTestPalette(arena.allocator(), &palette);
+    try std.testing.expectEqualStrings("minecraft:stone", ch.sections[0].names[0]);
+    try std.testing.expectEqualStrings("", ch.sections[0].states[0]);
+}
+
+test "decode rejects unrecognized or malformed palette entries instead of substituting air" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var missing_name = [_]nbt.Entry{.{ .name = "future_id", .tag = .{ .string = "minecraft:stone" } }};
+    var bad_name = [_]nbt.Entry{.{ .name = "id", .tag = .{ .int = 1 } }};
+    var bad_props = [_]nbt.Entry{
+        .{ .name = "id", .tag = .{ .string = "minecraft:oak_log" } },
+        .{ .name = "properties", .tag = .{ .string = "axis=y" } },
+    };
+    var bad_property = [_]nbt.Entry{.{ .name = "axis", .tag = .{ .int = 1 } }};
+    var bad_property_fields = [_]nbt.Entry{
+        .{ .name = "Name", .tag = .{ .string = "minecraft:oak_log" } },
+        .{ .name = "Properties", .tag = .{ .compound = &bad_property } },
+    };
+    var bad_wrapper = [_]nbt.Entry{.{ .name = "", .tag = .{ .int = 1 } }};
+    const entries = [_]nbt.Tag{
+        .{ .int = 1 },
+        .{ .string = "" },
+        .{ .compound = &.{} },
+        .{ .compound = &missing_name },
+        .{ .compound = &bad_name },
+        .{ .compound = &bad_props },
+        .{ .compound = &bad_property_fields },
+        .{ .compound = &bad_wrapper },
+    };
+    for (entries) |entry| {
+        var palette = [_]nbt.Tag{entry};
+        try std.testing.expectError(error.InvalidBlockState, decodeTestPalette(arena.allocator(), &palette));
+    }
 }
 
 test "bitsForPalette" {
