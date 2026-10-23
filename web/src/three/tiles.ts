@@ -372,6 +372,9 @@ export class TileManager {
           this.coverageDirty = true;
         }
       }
+      // Coverage can hide the last fallback on this frame. Once no fades
+      // remain, render-on-demand needs one final notification to draw it.
+      if (this.fadingKeys.size === 0) this.emitter.emit('change', this.stats);
     }
     if (this.coverageDirty) this.applyCoverage();
     // Re-plan only when the focus has moved a quarter tile; otherwise just keep
@@ -592,12 +595,14 @@ export class TileManager {
    */
   private applyCoverage(): void {
     this.coverageDirty = false;
-    // Areas shown at the finer level, seeded with resident hires tiles. A tile
-    // still fading in does NOT cover yet — its placeholder must keep showing
-    // through the dissolve.
+    // Resolved empty tiles cover their area too: there is nothing left to
+    // draw there. A tile still fading in does NOT cover yet — its placeholder
+    // must keep showing through the dissolve.
     let shown = new Set<string>();
     for (const [key, rec] of this.records) {
-      if (rec.level === 0 && rec.state === 'ready' && !this.fadingKeys.has(key)) shown.add(tileKey(rec.ref.x, rec.ref.z));
+      if (rec.level === 0 && (rec.state === 'empty' || (rec.state === 'ready' && !this.fadingKeys.has(key)))) {
+        shown.add(tileKey(rec.ref.x, rec.ref.z));
+      }
     }
     // Map-memory impostors hide under exactly the hires tiles that cover them
     // (and pop back the moment one unloads).
@@ -615,10 +620,11 @@ export class TileManager {
             if (finerIndex.has(childKey) && !shown.has(childKey)) covered = false;
           }
         }
-        const rec = this.records.get(recKey(lvl.level, t.x, t.z));
+        const key = recKey(lvl.level, t.x, t.z);
+        const rec = this.records.get(key);
         const ready = rec?.state === 'ready';
         if (ready && rec!.terrain) rec!.terrain.visible = !covered;
-        if (ready || covered) shownHere.add(tileKey(t.x, t.z));
+        if ((ready && !this.fadingKeys.has(key)) || rec?.state === 'empty' || covered) shownHere.add(tileKey(t.x, t.z));
       }
       shown = shownHere;
       finerIndex = this.lowIndex.get(lvl.level) ?? new Set<string>();
@@ -843,7 +849,9 @@ export class TileManager {
       if (this.disposed || rec.state !== 'loading') return; // unloaded mid-fetch
       const mesh = buildLowresMesh(tile, this.lowresMaterial);
       if (!mesh) {
-        rec.state = 'empty'; // all-empty tile: nothing to draw, never retry
+        // Empty or isolated samples can yield no drawable quads. This is a
+        // completed result, so ancestors must no longer wait for this tile.
+        this.markEmpty(rec);
         return;
       }
       // Coarser rings draw first (less overdraw); the dip in buildLowresMesh
@@ -880,6 +888,14 @@ export class TileManager {
       this.inFlight--;
       this.pump();
     }
+  }
+
+  /** A successful empty result still completes coverage and loading progress. */
+  private markEmpty(rec: Record_): void {
+    rec.state = 'empty';
+    this.coverageDirty = true;
+    this.invalidate();
+    this.emitter.emit('change', this.stats);
   }
 
   /** A transient failure (network blip, 5xx) retries with exponential backoff
@@ -928,7 +944,7 @@ export class TileManager {
       // them empty — no geometry, never retry — instead of choking on a 0-byte
       // parse. (A batch render just omits such tiles from the manifest.)
       if (buffer.byteLength === 0) {
-        rec.state = 'empty';
+        this.markEmpty(rec);
         return;
       }
 
