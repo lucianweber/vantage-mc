@@ -2565,6 +2565,24 @@ test "block-entity stand-ins keep each block recognizable" {
     try std.testing.expect(blockEntityBox("minecraft:moving_piston") == null);
 }
 
+test "verified compact defaults also reach special geometry and fluid properties" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const registry = try @import("block_defaults.zig").Catalog.parse(a, @embedFile("testdata/block_defaults.json"));
+    const chest_state = (try registry.expand(a, "chest", "")).?;
+    const chest = specialBlockModel("minecraft:chest", chest_state).?;
+    try std.testing.expectEqual(model.Dir.north, chest.facing);
+    try std.testing.expectEqualDeep(specialBlockModel("minecraft:chest", "facing=north,type=single,waterlogged=false").?, chest);
+    const bed_state = (try registry.expand(a, "red_bed", "")).?;
+    const bed = specialBlockModel("minecraft:red_bed", bed_state).?;
+    try std.testing.expectEqual(model.Dir.north, bed.facing);
+    try std.testing.expect(!bed.head_part);
+    try std.testing.expect(isWaterlogged("minecraft:conduit", (try registry.expand(a, "conduit", "")).?));
+    try std.testing.expectEqual(@as(u8, 0), parseLevel((try registry.expand(a, "water", "")).?));
+    try std.testing.expectEqual(@as(u8, 2), parseLevel((try registry.expand(a, "water", "level=2")).?));
+}
+
 test "special block models are textured, state-aware, and never full-cell cubes" {
     const single = specialBlockModel("minecraft:chest", "facing=east,type=single,waterlogged=false").?;
     try std.testing.expectEqualStrings("entity/chest/normal", single.texture);

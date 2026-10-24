@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const nbt = @import("nbt.zig");
+const defaults = @import("block_defaults.zig");
 
 pub const SECTION_DIM = 16;
 pub const SECTION_BLOCKS = SECTION_DIM * SECTION_DIM * SECTION_DIM; // 4096
@@ -27,7 +28,9 @@ pub const Section = struct {
     /// Palette block names (slices into the NBT arena).
     names: [][]const u8,
     /// Per-palette-entry normalized block-state key ("axis=x", "facing=north,
-    /// half=bottom", …), sorted by property; "" for compact/default states.
+    /// half=bottom", …), sorted by property. Render decoding expands compact
+    /// defaults when a registry is available; structural decoding keeps only
+    /// the properties explicitly present in NBT.
     states: [][]const u8,
     /// 4096 palette indices in YZX order. For a single-entry palette this is
     /// empty and every block is `names[0]`.
@@ -82,6 +85,12 @@ fn bitsFor(n: usize, min_bits: u6) u6 {
 /// Decode a parsed chunk root compound into sections. All allocations come from
 /// `arena`; names alias the NBT buffer (also arena-owned), so nothing is copied.
 pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
+    return decodeForRender(arena, root, null);
+}
+
+/// Rendering expands modern states before grid interning. A null store keeps
+/// the structural decoder usable without assets/network for inspection tools.
+pub fn decodeForRender(arena: std.mem.Allocator, root: []const nbt.Entry, store: ?*defaults.Store) Error!Chunk {
     const data_version: i32 = blk: {
         const t = nbt.get(root, "DataVersion") orelse break :blk 0;
         break :blk if (t.* == .int) t.int else 0;
@@ -98,6 +107,8 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
     };
     if (sections_tag.* != .list) return error.BadFormat;
     const raw_sections = sections_tag.list.items;
+    var catalog_requested = false;
+    var catalog: ?*const defaults.Catalog = null;
 
     var out: std.ArrayList(Section) = .empty;
     for (raw_sections) |sec| {
@@ -129,6 +140,17 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
             const state = try decodeBlockState(arena, p);
             nm.* = state.name;
             st.* = state.state;
+            if (state.needs_defaults) if (store) |registry| {
+                if (!catalog_requested) {
+                    catalog = try registry.catalog(data_version);
+                    catalog_requested = true;
+                }
+                if (catalog) |verified| {
+                    if (try verified.expand(arena, state.name, state.state)) |expanded| {
+                        st.* = expanded;
+                    } else try registry.warnUnknown(data_version, state.name);
+                }
+            };
         }
 
         const data_tag = nbt.get(bs.compound, "data");
@@ -160,7 +182,7 @@ pub fn decode(arena: std.mem.Allocator, root: []const nbt.Entry) Error!Chunk {
     };
 }
 
-const BlockState = struct { name: []const u8, state: []const u8 = "" };
+const BlockState = struct { name: []const u8, state: []const u8 = "", needs_defaults: bool = false };
 
 /// Accept both formats independently of DataVersion: upgraded worlds commonly
 /// contain chunks from multiple releases. Never turn an unrecognized entry into
@@ -168,7 +190,7 @@ const BlockState = struct { name: []const u8, state: []const u8 = "" };
 fn decodeBlockState(arena: std.mem.Allocator, entry: nbt.Tag) Error!BlockState {
     if (entry == .string) {
         if (entry.string.len == 0) return error.InvalidBlockState;
-        return .{ .name = entry.string };
+        return .{ .name = entry.string, .needs_defaults = true };
     }
     if (entry != .compound) return error.InvalidBlockState;
     const fields = entry.compound;
@@ -184,7 +206,7 @@ fn decodeBlockState(arena: std.mem.Allocator, entry: nbt.Tag) Error!BlockState {
         if (props.* != .compound) return error.InvalidBlockState;
         state = try buildStateKey(arena, props.compound);
     }
-    return .{ .name = name.string, .state = state };
+    return .{ .name = name.string, .state = state, .needs_defaults = nbt.get(fields, "id") != null };
 }
 
 /// Build a normalized state key from a block's properties compound: each
@@ -269,6 +291,10 @@ fn readInt(root: []const nbt.Entry, name: []const u8) i32 {
 
 // Exercise the real section decoder, including packed indices and a negative Y.
 fn decodeTestPalette(arena: std.mem.Allocator, palette: []nbt.Tag) !Chunk {
+    return decodeTestPaletteForRender(arena, palette, null);
+}
+
+fn decodeTestPaletteForRender(arena: std.mem.Allocator, palette: []nbt.Tag, store: ?*defaults.Store) !Chunk {
     var data: [256]i64 = @splat(0x10);
     var block_states = [_]nbt.Entry{
         .{ .name = "palette", .tag = .{ .list = .{ .elem = std.meta.activeTag(palette[0]), .items = palette } } },
@@ -285,7 +311,84 @@ fn decodeTestPalette(arena: std.mem.Allocator, palette: []nbt.Tag) !Chunk {
         .{ .name = "zPos", .tag = .{ .int = -22 } },
         .{ .name = "sections", .tag = .{ .list = .{ .elem = .compound, .items = &sections } } },
     };
-    return decode(arena, &root);
+    return decodeForRender(arena, &root, store);
+}
+
+test "render decoding expands compact and modern states but preserves legacy explicit properties" {
+    var store: defaults.Store = .{ .io = std.testing.io, .cache_root = "unused" };
+    defer store.deinit();
+    const a = store.arena.allocator();
+    const catalog = try a.create(defaults.Catalog);
+    catalog.* = try defaults.Catalog.parse(a, @embedFile("testdata/block_defaults.json"));
+    try store.catalogs.put(a, 5023, catalog);
+
+    var wrapped = [_]nbt.Entry{.{ .name = "", .tag = .{ .string = "minecraft:oak_log" } }};
+    var id_only = [_]nbt.Entry{.{ .name = "id", .tag = .{ .string = "minecraft:oak_log" } }};
+    const entries = [_]nbt.Tag{ .{ .string = "minecraft:oak_log" }, .{ .compound = &wrapped }, .{ .compound = &id_only } };
+    for (entries) |entry| {
+        var palette = [_]nbt.Tag{entry};
+        const ch = try decodeTestPaletteForRender(a, &palette, &store);
+        try std.testing.expectEqualStrings("axis=y", ch.sections[0].states[0]);
+        // Structural inspection must not need a registry or change its output.
+        const raw = try decodeTestPalette(a, &palette);
+        try std.testing.expectEqualStrings("", raw.sections[0].states[0]);
+    }
+    var props = [_]nbt.Entry{.{ .name = "facing", .tag = .{ .string = "east" } }};
+    var modern = [_]nbt.Entry{
+        .{ .name = "id", .tag = .{ .string = "minecraft:oak_stairs" } },
+        .{ .name = "properties", .tag = .{ .compound = &props } },
+    };
+    var legacy = [_]nbt.Entry{
+        .{ .name = "Name", .tag = .{ .string = "minecraft:oak_stairs" } },
+        .{ .name = "Properties", .tag = .{ .compound = &props } },
+    };
+    var palette = [_]nbt.Tag{ .{ .compound = &modern }, .{ .compound = &legacy } };
+    const ch = try decodeTestPaletteForRender(a, &palette, &store);
+    try std.testing.expectEqualStrings("facing=east,half=bottom,shape=straight,waterlogged=false", ch.sections[0].states[0]);
+    try std.testing.expectEqualStrings("facing=east", ch.sections[0].states[1]);
+}
+
+test "legacy-only render decoding never requests a registry and failed lookup preserves explicit state" {
+    const Probe = struct {
+        calls: usize = 0,
+        warnings: usize = 0,
+        fn fetch(ctx: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.calls += 1;
+            return error.NetworkUnavailable;
+        }
+        fn warn(ctx: ?*anyopaque, _: defaults.Warning) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.warnings += 1;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    var probe: Probe = .{};
+    var store: defaults.Store = .{ .io = std.testing.io, .cache_root = root, .fetcher = .{ .context = &probe, .fetch = Probe.fetch }, .reporter = .{ .context = &probe, .emit = Probe.warn } };
+    defer store.deinit();
+    // Chunk arenas are separate from the store, as in the threaded renderer.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var old = [_]nbt.Entry{.{ .name = "Name", .tag = .{ .string = "minecraft:stone" } }};
+    var palette = [_]nbt.Tag{.{ .compound = &old }};
+    _ = try decodeTestPaletteForRender(arena.allocator(), &palette, &store);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    var props = [_]nbt.Entry{.{ .name = "axis", .tag = .{ .string = "x" } }};
+    var modern = [_]nbt.Entry{
+        .{ .name = "id", .tag = .{ .string = "minecraft:oak_log" } },
+        .{ .name = "properties", .tag = .{ .compound = &props } },
+    };
+    var mixed = [_]nbt.Tag{ .{ .compound = &modern }, .{ .string = "minecraft:oak_log" } };
+    for (0..3) |_| {
+        const ch = try decodeTestPaletteForRender(arena.allocator(), &mixed, &store);
+        try std.testing.expectEqualStrings("axis=x", ch.sections[0].states[0]);
+        try std.testing.expectEqualStrings("", ch.sections[0].states[1]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.warnings);
 }
 
 test "decode preserves legacy block names, sorted properties, and packed indices" {

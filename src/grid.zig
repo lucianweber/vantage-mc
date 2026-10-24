@@ -9,6 +9,7 @@ const std = @import("std");
 const region = @import("region.zig");
 const nbt = @import("nbt.zig");
 const chunk = @import("chunk.zig");
+const defaults = @import("block_defaults.zig");
 
 pub const AIR: u16 = 0;
 
@@ -243,6 +244,19 @@ pub fn assemble(
     cz1: u5,
     stats: *Stats,
 ) !Grid {
+    return assembleForRender(arena, region_bytes, cx0, cz0, cx1, cz1, stats, null);
+}
+
+pub fn assembleForRender(
+    arena: std.mem.Allocator,
+    region_bytes: []const u8,
+    cx0: u5,
+    cz0: u5,
+    cx1: u5,
+    cz1: u5,
+    stats: *Stats,
+    store: ?*defaults.Store,
+) !Grid {
     const reg = region.Region.fromBytes(region_bytes);
 
     var loaded: std.ArrayList(chunk.Chunk) = .empty;
@@ -250,7 +264,7 @@ pub fn assemble(
     while (cz <= cz1) : (cz += 1) {
         var cx: u32 = cx0;
         while (cx <= cx1) : (cx += 1) {
-            const ch = decodeChunk(arena, reg, @intCast(cx), @intCast(cz)) catch |err| {
+            const ch = decodeChunkForRender(arena, reg, @intCast(cx), @intCast(cz), store) catch |err| {
                 switch (err) {
                     // An unknown palette encoding must reach the caller,
                     // rather than making this chunk look like missing air.
@@ -437,11 +451,15 @@ pub fn trimTop(g: *Grid, cut: i32) void {
 }
 
 pub fn decodeChunk(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5) !?chunk.Chunk {
+    return decodeChunkForRender(arena, reg, cx, cz, null);
+}
+
+fn decodeChunkForRender(arena: std.mem.Allocator, reg: region.Region, cx: u5, cz: u5, store: ?*defaults.Store) !?chunk.Chunk {
     const raw = (try reg.rawChunk(cx, cz)) orelse return null;
     const nbt_bytes = try region.decompress(arena, raw);
     var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };
     const root = try parser.parseRoot();
-    return try chunk.decode(arena, root);
+    return try chunk.decodeForRender(arena, root, store);
 }
 
 test "assemble propagates unrecognized block-state palettes" {

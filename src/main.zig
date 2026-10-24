@@ -15,6 +15,7 @@ const compress = @import("compress.zig");
 const nbt = @import("nbt.zig");
 const region = @import("region.zig");
 const chunk = @import("chunk.zig");
+const block_defaults = @import("block_defaults.zig");
 const grid = @import("grid.zig");
 const mesh = @import("mesh.zig");
 const tile = @import("tile.zig");
@@ -567,7 +568,9 @@ fn runMeshTex(init: std.process.Init, a: std.mem.Allocator, args: []const []cons
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, region_path, a, .unlimited);
 
     var stats: grid.Stats = .{};
-    const g = try grid.assemble(a, bytes, cx0, cz0, cx1, cz1, &stats);
+    var defaults = try defaultStore(init, a);
+    defer defaults.deinit();
+    const g = try grid.assembleForRender(a, bytes, cx0, cz0, cx1, cz1, &stats, &defaults);
 
     const resolver: model.Resolver = .{ .arena = a, .io = init.io, .root = assets };
     var builder = try texture.Builder.init(a, init.io, assets);
@@ -1030,6 +1033,8 @@ fn renderWorldArgs(
     args: []const []const u8,
     observer: ?*RenderProgress,
 ) !void {
+    var defaults = try defaultStore(init, a);
+    defer defaults.deinit();
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
@@ -1127,7 +1132,7 @@ fn renderWorldArgs(
     var done_before: usize = 0;
     for (loads.items, tile_sets.items) |wl, keys| {
         if (loads.items.len > 1) std.debug.print("\n── {s} ──\n", .{wl.dim.label});
-        const summary = try renderDimension(init, a, wl, keys, settings, root, observer, done_before);
+        const summary = try renderDimension(init, a, wl, keys, settings, root, observer, done_before, &defaults);
         try summaries.append(a, summary);
         done_before += keys.len;
     }
@@ -1164,6 +1169,7 @@ fn renderDimension(
     root: std.Progress.Node,
     observer: ?*RenderProgress,
     done_before: usize,
+    defaults: *block_defaults.Store,
 ) !DimSummary {
     const loaded = wl.loaded;
     const bounds = wl.bounds;
@@ -1214,6 +1220,7 @@ fn renderDimension(
     // parallel each tile meshes single-threaded; a one-worker render lets each
     // tile use every core.
     const sh = try setupShared(init.io, a, assets, loaded, .{
+        .defaults = defaults,
         .dim = dim,
         .tile_chunks = tile_chunks,
         .out_dir = out_dir,
@@ -1663,6 +1670,7 @@ fn writeAtlas(io: std.Io, a: std.mem.Allocator, dir: []const u8, arr: texture.Ar
 /// the run arena.
 const Shared = struct {
     io: std.Io,
+    defaults: *block_defaults.Store,
     /// The run arena (single-threaded); `sa` is its locked, thread-safe view.
     base: std.mem.Allocator,
     sa: std.mem.Allocator = undefined,
@@ -1717,6 +1725,7 @@ const Shared = struct {
 
 /// Per-render knobs for `setupShared` (everything not derived from the world).
 const SharedConfig = struct {
+    defaults: *block_defaults.Store,
     dim: dimension.Profile = dimension.overworld,
     tile_chunks: i32,
     out_dir: []const u8,
@@ -1736,6 +1745,7 @@ fn setupShared(io: std.Io, a: std.mem.Allocator, assets: []const u8, loaded: []c
     const sh = try a.create(Shared);
     sh.* = .{
         .io = io,
+        .defaults = cfg.defaults,
         .base = a,
         .loaded = loaded,
         .dim = cfg.dim,
@@ -1892,7 +1902,7 @@ fn bakeTileFromRegions(
     const cz1 = (tz + 1) * tile_chunks;
 
     const t_r0 = std.Io.Timestamp.now(io, .awake);
-    var g = try world.assembleWindow(ta, io, regions, cx0, cz0, cx1, cz1, &res.stats, null);
+    var g = try world.assembleWindow(ta, io, regions, cx0, cz0, cx1, cz1, &res.stats, null, sh.defaults);
     res.read_ms = t_r0.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
     // The nether's lid comes off before anything else touches the grid, so the
     // roof is never lit, meshed, or colour-mapped — the cut saves work rather
@@ -3992,6 +4002,8 @@ fn runServer(init: std.process.Init, a: std.mem.Allocator, args: []const []const
 }
 
 fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8, server_mode: bool) !void {
+    var defaults = try defaultStore(init, a);
+    defer defaults.deinit();
     if (args.len < 1) return usage();
     const save = args[0];
     var assets_opt: ?[]const u8 = null;
@@ -4175,6 +4187,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         null;
 
     const sh = try setupShared(init.io, a, wl.assets, wl.loaded, .{
+        .defaults = &defaults,
         .dim = dim,
         .tile_chunks = tile_chunks,
         .out_dir = out_dir,
@@ -4349,6 +4362,12 @@ test "CORS origins are absolute HTTP origins without paths or credentials" {
     try std.testing.expect(!validCorsOrigin("https://user@launcher.example"));
     try std.testing.expect(!validCorsOrigin("file:///tmp/launcher"));
     try std.testing.expect(!validCorsOrigin("launcher.example"));
+}
+
+fn defaultStore(init: std.process.Init, a: std.mem.Allocator) !block_defaults.Store {
+    const home = init.environ_map.get("HOME") orelse init.environ_map.get("USERPROFILE") orelse ".";
+    const root = try std.fmt.allocPrint(a, "{s}/.cache/vantage/registries/mcmeta", .{home});
+    return .{ .io = init.io, .cache_root = root };
 }
 
 fn runExtract(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {

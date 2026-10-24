@@ -1,0 +1,23 @@
+{
+  "stone": [{}, {}],
+  "oak_log": [{"axis": ["x", "y", "z"]}, {"axis": "y"}],
+  "deepslate": [{"axis": ["x", "y", "z"]}, {"axis": "y"}],
+  "oak_stairs": [
+    {"facing": ["north", "east", "south", "west"], "half": ["top", "bottom"], "shape": ["straight", "inner_left"], "waterlogged": ["true", "false"]},
+    {"facing": "north", "half": "bottom", "shape": "straight", "waterlogged": "false"}
+  ],
+  "oak_fence": [
+    {"east": ["true", "false"], "north": ["true", "false"], "south": ["true", "false"], "west": ["true", "false"], "waterlogged": ["true", "false"]},
+    {"east": "false", "north": "false", "south": "false", "west": "false", "waterlogged": "false"}
+  ],
+  "chest": [
+    {"facing": ["north", "east", "south", "west"], "type": ["single", "left", "right"], "waterlogged": ["true", "false"]},
+    {"facing": "north", "type": "single", "waterlogged": "false"}
+  ],
+  "red_bed": [
+    {"facing": ["north", "east", "south", "west"], "occupied": ["true", "false"], "part": ["head", "foot"]},
+    {"facing": "north", "occupied": "false", "part": "foot"}
+  ],
+  "water": [{"level": ["0", "1", "2"]}, {"level": "0"}],
+  "conduit": [{"waterlogged": ["true", "false"]}, {"waterlogged": "true"}]
+}

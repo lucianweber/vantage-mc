@@ -7,6 +7,7 @@
 //! is automatic, with no seams between regions.
 
 const std = @import("std");
+const defaults = @import("block_defaults.zig");
 const region = @import("region.zig");
 const grid = @import("grid.zig");
 const chunk = @import("chunk.zig");
@@ -342,6 +343,7 @@ pub fn assembleWindow(
     cz1: i32,
     stats: *grid.Stats,
     prog: ?std.Progress.Node,
+    store: *defaults.Store,
 ) !grid.Grid {
     var chunks: std.ArrayList(chunk.Chunk) = .empty;
     for (loaded) |r| {
@@ -369,7 +371,7 @@ pub fn assembleWindow(
                     stats.chunks_missing += 1;
                     continue;
                 };
-                const ch = decodeChunkAt(arena, io, file, loc) catch |err| {
+                const ch = decodeChunkAt(arena, io, file, loc, store) catch |err| {
                     switch (err) {
                         error.InvalidBlockState => return err,
                         error.PreModernChunk => stats.chunks_premodern += 1,
@@ -397,7 +399,7 @@ pub fn assembleWindow(
 /// Read one chunk's sectors from an open region file and decode it. The raw
 /// sector buffer, NBT bytes, and decoded sections all come from `arena` (the
 /// caller's per-tile arena), freed together when the tile completes.
-fn decodeChunkAt(arena: std.mem.Allocator, io: std.Io, file: std.Io.File, loc: region.Loc) !?chunk.Chunk {
+fn decodeChunkAt(arena: std.mem.Allocator, io: std.Io, file: std.Io.File, loc: region.Loc, store: *defaults.Store) !?chunk.Chunk {
     const size: usize = @as(usize, loc.sector_count) * region.SECTOR;
     if (size == 0) return null;
     const buf = try arena.alloc(u8, size);
@@ -406,7 +408,7 @@ fn decodeChunkAt(arena: std.mem.Allocator, io: std.Io, file: std.Io.File, loc: r
     const nbt_bytes = try region.decompress(arena, raw);
     var parser = nbt.Parser{ .buf = nbt_bytes, .arena = arena };
     const root = try parser.parseRoot();
-    return try chunk.decode(arena, root);
+    return try chunk.decodeForRender(arena, root, store);
 }
 
 test "parseRegionName" {

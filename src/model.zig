@@ -105,8 +105,9 @@ pub const Resolver = struct {
 
     /// Resolve every part of a block into a flat list of ResolvedModels (one per
     /// chosen variant / matching multipart part). `state` is the normalized
-    /// block-state key ("axis=x", "facing=north,half=bottom", …); pass "" for the
-    /// default. Most blocks yield exactly one model.
+    /// block-state key ("axis=x", "facing=north,half=bottom", …). Rendering
+    /// expands Minecraft defaults before this point; "" uses the legacy model
+    /// fallback and is only exact for stateless blocks. Most yield one model.
     pub fn resolveBlock(self: Resolver, block_name: []const u8, state: []const u8) ![]ResolvedModel {
         if (self.lock) |l| l.lockUncancelable(self.io);
         defer if (self.lock) |l| l.unlock(self.io);
@@ -501,6 +502,29 @@ test "variant condition + when matching" {
     const when_alt = try json.parseFromSliceLeaky(json.Value, a, "{\"facing\":\"north|south\"}", .{});
     try std.testing.expect(matchWhen(when_alt, "facing=south"));
     try std.testing.expect(!matchWhen(when_alt, "facing=east"));
+}
+
+test "verified defaults select oriented variants and multipart conditions independently of JSON ordering" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const registry = try @import("block_defaults.zig").Catalog.parse(a, @embedFile("testdata/block_defaults.json"));
+    // Deliberately put the horizontal model first, as in vanilla assets.
+    const variants = try json.parseFromSliceLeaky(json.Value, a,
+        \\{"axis=x":{"model":"horizontal","x":90,"y":90},"axis=y":{"model":"vertical"},"axis=z":{"model":"horizontal","x":90}}
+    , .{});
+    const compact = (try registry.expand(a, "oak_log", "")).?;
+    const chosen = pickVariant(variants, compact).?.object;
+    try std.testing.expectEqualStrings("vertical", chosen.get("model").?.string);
+    try std.testing.expectEqualDeep(pickVariant(variants, "axis=y"), pickVariant(variants, compact));
+    const explicit = (try registry.expand(a, "oak_log", "axis=x")).?;
+    try std.testing.expectEqual(@as(i64, 90), pickVariant(variants, explicit).?.object.get("x").?.integer);
+    const fence = (try registry.expand(a, "oak_fence", "")).?;
+    const disconnected = try json.parseFromSliceLeaky(json.Value, a, "{\"north\":\"false\"}", .{});
+    const connected = try json.parseFromSliceLeaky(json.Value, a, "{\"north\":\"true\"}", .{});
+    try std.testing.expect(matchWhen(disconnected, fence));
+    try std.testing.expect(!matchWhen(connected, fence));
+    try std.testing.expect(matchWhen(connected, (try registry.expand(a, "oak_fence", "north=true")).?));
 }
 
 test "texture variable resolution chains through the map" {
