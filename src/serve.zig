@@ -106,6 +106,8 @@ pub const Options = struct {
     host: []const u8 = "127.0.0.1",
     /// Launch the default browser at the served URL once listening.
     open: bool = false,
+    /// Override the built-in page's tab title. Null or blank keeps its default.
+    page_title: ?[]const u8 = null,
     /// On-demand content source. When set, requests it owns (the live manifest,
     /// atlas, and un-cached tiles) are synthesized instead of read from disk.
     producer: ?Producer = null,
@@ -115,6 +117,9 @@ pub const Options = struct {
 };
 
 pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
+    // Prepare once in the process arena: detached workers share these bytes.
+    // The API has no viewer and ignores page configuration.
+    const page_html = if (opts.api == null) try viewerHtml(arena, opts.page_title) else fallback_html;
     const addr = std.Io.net.IpAddress.parse(opts.host, opts.port) catch {
         std.debug.print("invalid --host address: '{s}' (expected e.g. 127.0.0.1 or 0.0.0.0)\n", .{opts.host});
         return error.InvalidAddress;
@@ -178,7 +183,7 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, opts: Options) !void {
         // One detached thread per connection: browsers hold a handful of
         // keep-alive connections open, so serving them sequentially would
         // stall tile streaming. If spawning fails, serve inline.
-        if (std.Thread.spawn(.{}, connection, .{ io, stream, opts.dir, opts.producer, opts.api, connection_slots })) |t| t.detach() else |_| connection(io, stream, opts.dir, opts.producer, opts.api, connection_slots);
+        if (std.Thread.spawn(.{}, connection, .{ io, stream, opts.dir, opts.producer, opts.api, page_html, connection_slots })) |t| t.detach() else |_| connection(io, stream, opts.dir, opts.producer, opts.api, page_html, connection_slots);
     }
 }
 
@@ -189,6 +194,7 @@ fn connection(
     dir: []const u8,
     producer: ?Producer,
     api: ?ApiOptions,
+    page_html: []const u8,
     slots: *std.Io.Semaphore,
 ) void {
     defer slots.post(io);
@@ -203,7 +209,7 @@ fn connection(
     var requests: usize = 0;
     while (requests < request_limit) : (requests += 1) {
         var req = http.receiveHead() catch return; // peer closed / bad head
-        serveRequest(io, &req, dir, producer, api) catch return; // write failed: drop the connection
+        serveRequest(io, &req, dir, producer, api, page_html) catch return; // write failed: drop the connection
     }
 }
 
@@ -213,6 +219,7 @@ fn serveRequest(
     dir: []const u8,
     producer: ?Producer,
     api: ?ApiOptions,
+    page_html: []const u8,
 ) !void {
     if (api) |policy| return serveApiRequest(io, req, dir, producer, policy);
 
@@ -228,7 +235,8 @@ fn serveRequest(
     for (viewer.files) |f| {
         if (!std.mem.eql(u8, f.path, target)) continue;
         const immutable = std.mem.startsWith(u8, target, "/assets/");
-        return req.respond(f.bytes, .{ .extra_headers = &.{
+        const bytes = if (std.mem.eql(u8, target, "/index.html")) page_html else f.bytes;
+        return req.respond(bytes, .{ .extra_headers = &.{
             .{ .name = "content-type", .value = mimeType(f.path) },
             .{ .name = "cache-control", .value = if (immutable) "public, max-age=31536000, immutable" else "no-cache" },
             security_headers[0],
@@ -265,7 +273,7 @@ fn serveRequest(
     if (req.head.method == .HEAD) {
         const stat = std.Io.Dir.cwd().statFile(io, full, .{}) catch {
             if (viewer.files.len == 0 and std.mem.eql(u8, rel, "index.html"))
-                return headFileResponse(req, .ok, "text/html; charset=utf-8", "no-cache", null, fallback_html.len);
+                return headFileResponse(req, .ok, "text/html; charset=utf-8", "no-cache", null, page_html.len);
             return req.respond("not found\n", .{ .status = .not_found, .extra_headers = security_headers[0..] });
         };
         return headFileResponse(req, .ok, mimeType(rel), "no-cache", null, stat.size);
@@ -273,7 +281,7 @@ fn serveRequest(
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited) catch {
         // Without an embedded viewer the root gets a pointer, not a 404.
         if (viewer.files.len == 0 and std.mem.eql(u8, rel, "index.html"))
-            return req.respond(fallback_html, .{ .extra_headers = &.{
+            return req.respond(page_html, .{ .extra_headers = &.{
                 .{ .name = "content-type", .value = "text/html; charset=utf-8" },
                 .{ .name = "cache-control", .value = "no-cache" },
                 security_headers[0],
@@ -690,6 +698,68 @@ const fallback_html =
     \\zig build -Doptimize=ReleaseFast</pre>
     \\<p>Any web app using the <code>vantage-mc</code> npm package can also point at this server.</p>
 ;
+
+fn viewerHtml(a: std.mem.Allocator, title: ?[]const u8) ![]const u8 {
+    for (viewer.files) |f| {
+        if (std.mem.eql(u8, f.path, "/index.html")) return withPageTitle(a, f.bytes, title);
+    }
+    return withPageTitle(a, fallback_html, title);
+}
+
+/// Only the title text changes; null/blank titles reuse the original HTML.
+fn withPageTitle(a: std.mem.Allocator, html: []const u8, title: ?[]const u8) ![]const u8 {
+    const text = std.mem.trim(u8, title orelse return html, " \t\r\n\x0b\x0c");
+    if (text.len == 0) return html;
+    const start = (std.mem.indexOf(u8, html, "<title>") orelse return html) + "<title>".len;
+    const end = start + (std.mem.indexOf(u8, html[start..], "</title>") orelse return html);
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(a);
+    try result.appendSlice(a, html[0..start]);
+    for (text) |c| {
+        switch (c) {
+            '&' => try result.appendSlice(a, "&amp;"),
+            '<' => try result.appendSlice(a, "&lt;"),
+            '>' => try result.appendSlice(a, "&gt;"),
+            '"' => try result.appendSlice(a, "&quot;"),
+            '\'' => try result.appendSlice(a, "&#39;"),
+            else => try result.append(a, c),
+        }
+    }
+    try result.appendSlice(a, html[end..]);
+    return result.toOwnedSlice(a);
+}
+
+test "page title preserves default HTML for absent and blank values" {
+    const html = "<head><title>Vantage — viewer</title></head>";
+    for ([_]?[]const u8{ null, "", " \t\r\n\x0b\x0c" }) |title| {
+        const result = try withPageTitle(std.testing.allocator, html, title);
+        try std.testing.expectEqualStrings(html, result);
+        try std.testing.expectEqual(html.ptr, result.ptr);
+    }
+}
+
+test "page title replaces only title text and trims surrounding whitespace" {
+    const result = try withPageTitle(std.testing.allocator, "<head><title>Default</title></head><body>Default</body>", " \tMy 世界 🌍\r\n");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("<head><title>My 世界 🌍</title></head><body>Default</body>", result);
+}
+
+test "page title escapes HTML including title closing tags" {
+    const result = try withPageTitle(std.testing.allocator, "<title>Default</title>", "A & B \"quoted\" 'name' </title><script>alert(1)</script>");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("<title>A &amp; B &quot;quoted&quot; &#39;name&#39; &lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;</title>", result);
+}
+
+test "built-in fallback and embedded viewer support page title overrides" {
+    const a = std.testing.allocator;
+    const fallback = try withPageTitle(a, fallback_html, "My map");
+    defer a.free(fallback);
+    try std.testing.expect(std.mem.indexOf(u8, fallback, "<title>My map</title>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fallback, "<h1 style=") != null);
+    const html = try viewerHtml(a, "My map");
+    defer a.free(html);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<title>My map</title>") != null);
+}
 
 /// Best-effort browser launch; failures are silent (the URL is printed anyway).
 fn openBrowser(io: std.Io, a: std.mem.Allocator, url: []const u8) void {

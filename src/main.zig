@@ -102,6 +102,8 @@ fn printUsage() void {
         \\      View a render in your browser — a local web server with the viewer
         \\      built in (default dir: web/public, port: 8268). --open launches the
         \\      browser; --host 0.0.0.0 shares the map on your local network.
+        \\      VANTAGE_PAGE_TITLE sets the browser tab title at startup (also for live).
+        \\      Unset or blank keeps the default; restart after changing it.
         \\  vantage live    <world-save-dir> [--out <dir>] [--tile-chunks <n>] [--radius <chunks>]
         \\                  [--light flat|smooth] [--biome-blend on|off] [--caves full|<y>]
         \\                  [--dimension <name>] [--ceiling <y>|keep]
@@ -2569,7 +2571,10 @@ test "buildManifest carries caves + yRange for the depth slider" {
 /// `vantage serve [render-dir] [--port n] [--host addr] [--open]` — host a
 /// rendered world plus the embedded web viewer on a local HTTP server.
 fn runServe(init: std.process.Init, a: std.mem.Allocator, args: []const []const u8) !void {
-    var opts: serve.Options = .{ .dir = "web/public" };
+    var opts: serve.Options = .{
+        .dir = "web/public",
+        .page_title = init.environ_map.get("VANTAGE_PAGE_TITLE"),
+    };
     var argi: usize = 0;
     while (argi < args.len) : (argi += 1) {
         const arg = args[argi];
@@ -4338,6 +4343,7 @@ fn runLiveMode(init: std.process.Init, a: std.mem.Allocator, args: []const []con
         .host = host,
         .open = open,
         .producer = server.producer(),
+        .page_title = if (server_mode) null else init.environ_map.get("VANTAGE_PAGE_TITLE"),
         .api = if (server_mode) .{
             .bearer_sha256 = bearer_sha256,
             .allowed_origins = allowed_origins.items,
