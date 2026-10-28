@@ -706,15 +706,14 @@ fn viewerHtml(a: std.mem.Allocator, title: ?[]const u8) ![]const u8 {
     return withPageTitle(a, fallback_html, title);
 }
 
-/// Only the title text changes; null/blank titles reuse the original HTML.
+/// Configure both the tab title and the viewer heading; blank keeps defaults.
 fn withPageTitle(a: std.mem.Allocator, html: []const u8, title: ?[]const u8) ![]const u8 {
     const text = std.mem.trim(u8, title orelse return html, " \t\r\n\x0b\x0c");
     if (text.len == 0) return html;
     const start = (std.mem.indexOf(u8, html, "<title>") orelse return html) + "<title>".len;
     const end = start + (std.mem.indexOf(u8, html[start..], "</title>") orelse return html);
     var result: std.ArrayList(u8) = .empty;
-    errdefer result.deinit(a);
-    try result.appendSlice(a, html[0..start]);
+    defer result.deinit(a);
     for (text) |c| {
         switch (c) {
             '&' => try result.appendSlice(a, "&amp;"),
@@ -725,8 +724,18 @@ fn withPageTitle(a: std.mem.Allocator, html: []const u8, title: ?[]const u8) ![]
             else => try result.append(a, c),
         }
     }
-    try result.appendSlice(a, html[end..]);
-    return result.toOwnedSlice(a);
+    const titled = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ html[0..start], result.items, html[end..] });
+    defer a.free(titled);
+    const meta = try std.fmt.allocPrint(a, "<meta name=\"vantage-page-title\" content=\"{s}\"", .{result.items});
+    defer a.free(meta);
+    return std.mem.replaceOwned(u8, a, titled, "<meta name=\"vantage-page-title\" content=\"vantage\"", meta);
+}
+
+test "viewer heading metadata shares the escaped page title" {
+    const html = "<meta name=\"vantage-page-title\" content=\"vantage\" /><title>Default</title>";
+    const result = try withPageTitle(std.testing.allocator, html, " My \"world\" <&> ");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("<meta name=\"vantage-page-title\" content=\"My &quot;world&quot; &lt;&amp;&gt;\" /><title>My &quot;world&quot; &lt;&amp;&gt;</title>", result);
 }
 
 test "page title preserves default HTML for absent and blank values" {

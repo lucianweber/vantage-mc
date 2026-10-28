@@ -58,6 +58,8 @@ export interface ManifestAtmosphere {
 
 /** A parsed `manifest.json` for a tiled world render. */
 export interface WorldManifest {
+  /** Completed dimension render time, Unix epoch milliseconds; absent for live/older renders. */
+  renderedAt?: number;
   /** Manifest schema version (1 = hires tiles only, 2 adds `lowres`,
    *  3 = VTL7 compact tiles, 4 = lightmaps, 5 = packed RG8 lightmaps,
    *  6 = VTLA cave-partitioned tiles). */
@@ -253,6 +255,7 @@ export function parseManifest(data: unknown): WorldManifest {
   const atmosphere = parseAtmosphere(m['atmosphere']);
   const maxSectionVerts = m['maxSectionVerts'];
   const textureLayers = m['textureLayers'];
+  const renderedAt = m['renderedAt'];
   const pr = m['progress'] as Record<string, unknown> | undefined;
   const progress =
     typeof pr === 'object' && pr !== null && typeof pr['done'] === 'number' && typeof pr['total'] === 'number'
@@ -260,6 +263,7 @@ export function parseManifest(data: unknown): WorldManifest {
       : undefined;
   return {
     format,
+    ...(typeof renderedAt === 'number' && Number.isFinite(renderedAt) && renderedAt > 0 && renderedAt <= 8.64e15 ? { renderedAt } : {}),
     tileChunks,
     tileBlocks,
     textures,

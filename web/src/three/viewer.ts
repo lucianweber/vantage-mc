@@ -187,6 +187,12 @@ export interface LoadOptions {
 
 /** Metadata describing a loaded tile. */
 export interface TileInfo {
+  /** Completed dimension render time, Unix epoch milliseconds. */
+  renderedAt?: number;
+  /** Whether a batch render is still running. */
+  rendering?: boolean;
+  /** Tiles are rendered on demand rather than as a completed batch. */
+  dynamic?: boolean;
   magic: string;
   vertexCount: number;
   triangleCount: number;
@@ -214,7 +220,7 @@ interface ViewerEvents extends Record<string, unknown> {
   slice: { y: number | null };
   /** Progressive/live render progress. Finished batch renders flip false;
    *  continuous multiplayer sources keep rendering true for change polling. */
-  progress: { done: number; total: number; rendering: boolean };
+  progress: { done: number; total: number; rendering: boolean; renderedAt?: number; dynamic?: boolean };
   /** The player roster changed — someone moved, joined, or left. Fires only
    *  when something actually differs, so it is safe to drive React state with.
    *  `available` goes false when the world serves no roster at all. */
@@ -359,7 +365,7 @@ export class VantageViewer {
   private progressiveManager: TileManager | null = null;
   private lastTextureLayers = 0;
   /** Last progress payload emitted, for deduplication across identical polls. */
-  private lastProgress: { done: number; total: number; rendering: boolean } | null = null;
+  private lastProgress: ViewerEvents['progress'] | null = null;
   /** An in-flight atlas re-fetch, so the tile-insert gate and the progressive
    *  poll coalesce onto one request instead of racing separate fetches. */
   private atlasRefresh: Promise<void> | null = null;
@@ -670,6 +676,9 @@ export class VantageViewer {
     this.emitter.emit('load', {
       // Streamed worlds: the tile format follows the manifest schema version.
       magic: manifest.format >= 6 ? 'VTLA' : manifest.format >= 5 ? 'VTL9' : manifest.format >= 4 ? 'VTL8' : manifest.format >= 3 ? 'VTL7' : 'VTL6',
+      renderedAt: manifest.renderedAt,
+      rendering: manifest.rendering ?? false,
+      dynamic: manifest.dynamic ?? false,
       vertexCount: 0,
       triangleCount: 0,
       size,
@@ -770,9 +779,11 @@ export class VantageViewer {
       done: m.progress?.done ?? m.tiles.length,
       total: m.progress?.total ?? m.tiles.length,
       rendering: m.rendering ?? false,
+      renderedAt: m.renderedAt,
+      dynamic: m.dynamic ?? false,
     };
     const last = this.lastProgress;
-    if (last && last.done === progress.done && last.total === progress.total && last.rendering === progress.rendering) return false;
+    if (last && last.done === progress.done && last.total === progress.total && last.rendering === progress.rendering && last.renderedAt === progress.renderedAt && last.dynamic === progress.dynamic) return false;
     this.lastProgress = progress;
     this.emitter.emit('progress', progress);
     return true;

@@ -4,81 +4,18 @@
 // `just render <save>`). Deep-links: #top frames top-down, #biome opens the
 // biome layer.
 
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode } from 'react';
+import { Hud } from './Hud.js';
 import { createRoot } from 'react-dom/client';
 import { worldFromVantageServer } from '../src/core/index.js';
 import type { WorldSource } from '../src/core/index.js';
-import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, PlayerList, Reticle, SettingsPanel, useVantage, VantageViewer } from '../src/react/index.js';
+import { BiomeLayer, DepthSlider, DimensionPicker, LightPanel, MapNav, PlayerList, Reticle, SettingsPanel, VantageViewer } from '../src/react/index.js';
 import type { ViewMode } from '../src/react/index.js';
 
 const view: ViewMode = /top/i.test(location.hash) ? 'top' : 'orbit';
 const biomeOpen = /biome/i.test(location.hash);
 const viteEnv = (import.meta as ImportMeta & { readonly env: Record<string, string | undefined> }).env;
 const serverEndpoint = viteEnv['VITE_VANTAGE_SERVER_ENDPOINT']?.trim();
-
-/** A small HUD overlay showing the loaded tile's stats + the control legend — a
- *  custom child that reads the shared engine state via useVantage(). */
-function Hud() {
-  const { viewer, info } = useVantage();
-  const [flying, setFlying] = useState(false);
-  useEffect(() => {
-    if (!viewer) return;
-    setFlying(viewer.isFlying);
-    return viewer.on('mode', ({ fly }) => setFlying(fly));
-  }, [viewer]);
-  if (!info) return null;
-  const tris = Math.round(info.triangleCount).toLocaleString();
-  const verts = info.vertexCount.toLocaleString();
-  const dims = `${Math.round(info.size.x)}×${Math.round(info.size.y)}×${Math.round(info.size.z)}`;
-  const mono = 'ui-monospace, SFMono-Regular, Menlo, monospace';
-  const k = (t: string) => <b style={{ color: '#93a9cc' }}>{t}</b>;
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        top: 16,
-        // Clear of <PlayerList>, which owns the top-left corner whenever the
-        // world serves a roster.
-        left: 248,
-        padding: '12px 15px',
-        font: '12px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        color: '#e6eefb',
-        pointerEvents: 'none',
-        maxWidth: 320,
-      }}
-      className="vtg-glass"
-    >
-      <div style={{ fontWeight: 700, letterSpacing: '0.04em', color: '#eef4ff' }}>
-        vantage <b style={{ color: '#5b9bff', font: `600 11px ${mono}`, marginLeft: 2 }}>{info.magic}</b>
-      </div>
-      {serverEndpoint ? (
-        <div style={{ color: '#66e29a', marginTop: 4, font: `600 10px ${mono}`, letterSpacing: '0.06em' }}>
-          ● SERVER · PROTOCOL V1 · AUTHENTICATED
-        </div>
-      ) : null}
-      <div style={{ color: '#93a9cc', marginTop: 4, font: `11px ${mono}`, fontVariantNumeric: 'tabular-nums' }}>
-        {verts} verts · {tris} tris · {dims}
-      </div>
-      <div style={{ color: '#6f86ab', marginTop: 8, fontSize: 11, lineHeight: 1.6 }}>
-        {flying ? (
-          <>
-            {k('WASD')} fly · {k('Space/Shift')} up·down
-            <br />
-            {k('mouse')} look (click to capture) · {k('scroll')} speed · {k('Esc')} exit
-          </>
-        ) : (
-          <>
-            {k('drag')} pan · {k('right-drag')} orbit · {k('scroll')} zoom
-            <br />
-            {k('WASD')} move · {k('Q/E')} turn · {k('R/F')} tilt
-            <br />
-            {k('B')} biomes · {k('C')} caves · {k('P')} players
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
 
 /** What the viewer loads: a multi-dimension world index, a single manifest, a
  *  server world source, or the classic standalone tile. */
@@ -100,9 +37,11 @@ function App({ entry, serverWorld }: { entry: Entry; serverWorld?: WorldSource }
     : ({ tile: '/terrain.vtile', textures: '/terrain.vtexarr' } as const);
   return (
     <VantageViewer ref={ref} {...source} view={view}>
-      <Hud />
+      <div style={{ position: 'absolute', top: 16, left: 16, display: 'flex', flexDirection: 'column', gap: 16, width: 'max-content', maxWidth: 'calc(100% - 32px)', maxHeight: 'calc(100% - 32px)', pointerEvents: 'none' }}>
+        <Hud />
+        <PlayerList style={{ position: 'relative', top: 'auto', left: 'auto', right: 'auto', maxWidth: '100%', minHeight: 0, flexShrink: 1, pointerEvents: 'auto' }} />
+      </div>
       <Reticle />
-      <PlayerList />
       <DimensionPicker />
       <BiomeLayer legend hover defaultEnabled={biomeOpen} />
       <LightPanel />

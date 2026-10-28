@@ -1405,6 +1405,7 @@ fn renderDimension(
     try writeAtlas(init.io, a, out_dir, arr);
 
     const manifest = try buildManifest(a, .{
+        .rendered_at = std.Io.Timestamp.now(init.io, .real).toMilliseconds(),
         .dim = dim,
         .tile_chunks = tile_chunks,
         .spawn = spawn,
@@ -2194,6 +2195,8 @@ fn buildLowresPyramid(
 }
 
 const ManifestInput = struct {
+    /// Completed dimension render time, Unix epoch milliseconds.
+    rendered_at: ?i64 = null,
     /// Which dimension this manifest describes, and how the viewer should light
     /// and fog it (see the `dimension` and `atmosphere` keys).
     dim: dimension.Profile = dimension.overworld,
@@ -2352,6 +2355,7 @@ fn buildManifest(a: std.mem.Allocator, m: ManifestInput) ![]u8 {
             m.dim.ambient,        m.dim.daylight,
         },
     );
+    if (m.rendered_at) |stamp| try out.print(a, "  \"renderedAt\": {d},\n", .{stamp});
     if (m.rendering) try out.appendSlice(a, "  \"rendering\": true,\n");
     if (m.dynamic) try out.appendSlice(a, "  \"dynamic\": true,\n");
     if (m.progress) |p| try out.print(a, "  \"progress\": {{ \"done\": {d}, \"total\": {d} }},\n", .{ p[0], p[1] });
@@ -2502,6 +2506,7 @@ test "the cave horizon follows --caves, then the dimension's own default" {
 test "buildManifest describes the dimension and its atmosphere" {
     const a = std.testing.allocator;
     const json = try buildManifest(a, .{
+        .rendered_at = 1793188800000,
         .dim = dimension.nether,
         .tile_chunks = 8,
         .spawn = null,
@@ -2509,6 +2514,7 @@ test "buildManifest describes the dimension and its atmosphere" {
         .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
     });
     defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"renderedAt\": 1793188800000") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"id\": \"minecraft:the_nether\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"slug\": \"the_nether\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"kind\": \"nether\"") != null);
@@ -2522,6 +2528,7 @@ test "buildManifest describes the dimension and its atmosphere" {
         .tiles = &.{.{ .tx = 0, .tz = 0, .bytes = 1 }},
     });
     defer a.free(ow);
+    try std.testing.expect(std.mem.indexOf(u8, ow, "renderedAt") == null);
     try std.testing.expect(std.mem.indexOf(u8, ow, "\"slug\": \"overworld\"") != null);
 }
 

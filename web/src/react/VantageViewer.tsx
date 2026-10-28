@@ -164,6 +164,9 @@ export const VantageViewer = forwardRef<Engine | null, VantageViewerProps>(funct
           );
         });
       }),
+      v.on('progress', ({ renderedAt, rendering, dynamic }) =>
+        setS((p) => p.info ? { ...p, info: { ...p.info, renderedAt, rendering, dynamic } } : p),
+      ),
       v.on('biomes', (biomes) => setS((p) => ({ ...p, biomes }))),
       v.on('dimension', ({ dimensions, current }) => setS((p) => ({ ...p, dimensions, dimension: current }))),
       v.on('hover', (id) => setS((p) => (p.hoveredBiome === id ? p : { ...p, hoveredBiome: id }))),

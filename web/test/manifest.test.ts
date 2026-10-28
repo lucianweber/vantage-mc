@@ -18,6 +18,13 @@ const good = {
 };
 
 describe('parseManifest', () => {
+  it('reads optional render dates and ignores invalid/legacy values', () => {
+    expect(parseManifest({ ...good, renderedAt: 1793188800000 }).renderedAt).toBe(1793188800000);
+    for (const renderedAt of [undefined, null, 'today', 0, -1, NaN, Infinity, 8.64e15 + 1]) {
+      expect(parseManifest({ ...good, renderedAt }).renderedAt).toBeUndefined();
+    }
+  });
+
   it('accepts a well-formed manifest', () => {
     const m = parseManifest(good);
     expect(m.tileChunks).toBe(8);
